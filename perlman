@@ -1,0 +1,1265 @@
+#!/usr/bin/perl -w
+
+=begin comment info
+
+	PerlMan -- PacMan clone written using the Perl::SDL
+	Version : $Id: perlman,v 1.1 2009-03-28 03:35:34 nick Exp $
+
+=end comment info
+=cut
+
+use strict;
+use Switch;
+
+## SDL Libraries
+use SDL;
+use SDL::App;
+use SDL::Surface;
+use SDL::Cursor;
+use SDL::Event;
+use SDL::Mixer;
+use SDL::Sound;
+use SDL::TTFont;
+
+## Some 'static' variable declarations
+my $LIVES 	= 3;
+my $FREE_LIFE	= 200;  #should be 10000
+my $UP		= 1;
+my $DOWN	= 2;
+my $LEFT	= 3;
+my $RIGHT	= 4;
+my $UP_LEFT	= 5;
+my $DOWN_LEFT	= 6;
+my $DOWN_RIGHT	= 7;
+my $UP_RIGHT	= 8;
+my $PATROL	= 0;
+my $CHASE	= 1;
+
+my $app = new SDL::App(
+        -title          =>      'PerlMan',
+        -width          =>      800,
+        -height         =>      600,
+        -depth          =>      32,
+        -flags          =>      SDL_DOUBLEBUF | SDL_HWSURFACE | SDL_HWACCEL,
+);
+
+my $mixer = new SDL::Mixer(
+        -frequency      =>      44100,
+        -channels       =>      2,
+	-size           =>      1024
+);
+
+## Debugging variables
+my $DEBUG		= 0;	# This will turn off ALL debugging, including the variables below
+my $drawPoints		= 1; 	# this will draw the collision rectangles
+my $labelRects		= 1;	# this numerically labels each one
+my $numOnly		= 1;	# this will draw ONLY the number labels and no grey rectangles
+my $collisionDebugOn	= 1;	# Collision data is printed to STDOUT
+my $drawWarps		= 1;    # draw warp collision rectangles
+my $drawWarpGates	= 1;	# draw the actual gates that warp pacman
+my $drawIntersections	= 1; 	# draw intersections
+my $drawGrid		= 1;	# draw path grid
+## End of debug vars
+
+my $boardOffsetX	= 5;
+my $boardOffsetY	= 0;
+my $pelletOffsetX	= 13;
+my $pelletOffsetY 	= 0;
+my $level	 	= 0; 	# keep track of the level, we default to '0' till the game begins
+my $playing	 	= 0;	#0 Are we playing the game?  default to '0' till game starts
+my $gameOver	 	= 0;
+my $redraw_all   	= 0;
+my $score	 	= 0;
+my $highScore		= 0;
+my $lives	 	= 0;
+my $players	 	= 0;
+my $freeLife	 	= $FREE_LIFE;
+my $revdFreeLife 	= 0;
+my $ghostSpeed   	= 1;
+my $perlManSpeed 	= 0;
+my $perlManAnimSpeed 	= 7;
+my $perlManAnim		= 0;
+my $direction	 	= $LEFT;
+my $directionOld 	= $direction;
+my $directionNext	= 0;
+my $fullscreen   	= 0;
+my $baseSpeed	 	= 0.3;
+my $eattenPellets	= 0;
+my %ghosts;			# ghost data
+my @ghostColors		= ( 'red', 'cyan', 'pink', 'orange' );  # in order of agression
+my %ghostAggressions	= ( 'red' => 90, 'cyan' => 70, 'pink' => 50, 'orange' => 30 );
+my @levelFruits		= ( 'cherry', 'strawberry', 'orange', 'pretzel', 
+			    'apple', 'pear', 'banana' );
+my @ghostStart		= ( { x => 260, y => 207, color => 'red'    },
+			    { x => 260, y => 265, color => 'pink'   },
+			    { x => 222, y => 265, color => 'cyan'   },
+			    { x => 298, y => 265, color => 'orange' },
+			  );
+
+## intersections
+## These intersections are for a method I am trying out with the ghosts
+## When they hit an intersection they will be given which directions they can go
+## to determine which way to move.  So a ghost will move in one direction until
+## it reaches an intersection, unless the ghost has a high agression level and
+## is chasing pacman. 
+##
+## The format of this is the upper left corner coordinate, (x, y) and which
+## directions are available, up, down, left, right.  Example, the lower right
+## corner of the screen, you can go up and left: 
+##
+## ( 498, 552, 1, 0, 1, 0 )
+##
+my @intersections = (
+			14, 16, 0, 1, 0, 1, 	# 0
+			114, 14, 0, 1, 1, 1, 	# 2
+			232, 16, 0, 1, 1, 0, 	# 5
+			230, 92, 1, 0, 1, 1,	# 17, 5
+			172, 92, 0, 1, 1, 1, 	# 3, 17
+			114, 92, 1, 1, 1, 1, 	# 1, 3
+			14, 92, 1, 1, 0, 1, 	# 1
+			498, 552, 1, 0, 1, 0	
+		    );
+
+## Columns and row grid for pacman and ghosts to move along
+my @gridCorners	  = (
+			31, 30, 	# upper left
+			500, 30,	# upper right
+			31, 400, 	# bottom left
+			500,400		# bottom right	
+		    );
+my $gridDistance  = 30;
+my $gridXCount	  = 30;
+my $gridYCount	  = 30;
+
+## rectangle, top left, lower right (x1, y1, x2, y2 ); 1 rectangle per line
+my @gameBoardData	= ( 46, 50, 106, 90, 	# 0
+			    47, 126, 106, 147,	# 1
+			    142, 50, 221, 90,	# 2
+			    142, 127, 163, 262, # 3
+			    163, 183, 221, 204,	# 4
+			    258, 13, 278, 90,	# 5
+			    0, 3, 534, 13,	# 6
+			    314, 51, 393, 90,	# 7
+			    429, 51, 489, 90,	# 8
+			    429, 127, 489, 147,	# 9
+			    429, 185, 536, 262,	# 10
+			    526, 12, 536, 185,	# 11
+			    429, 299, 536, 377,	# 12
+			    526, 375, 536, 596,	# 13 $#
+			    487, 470, 528, 492,	# 14
+			    372, 126, 393, 262,	# 15
+			    314, 183, 373, 204,	# 16
+			    200, 127, 336, 146,	# 17
+			    257, 146, 278, 204,	# 18
+			    200, 470, 336, 492,	# 19
+			    257, 491, 278, 548, # 20
+			    372, 298, 393, 377,	# 21
+			    314, 414, 393, 433,	# 22
+			    200, 356, 336, 377,	# 23
+			    258, 375, 278, 434,	# 24
+			    285, 241, 336, 253,	# 25
+			    326, 253, 336, 308,	# 26
+			    200, 308, 336, 320, # 27
+			    200, 253, 210, 308,	# 28
+			    200, 241, 251, 253,	# 29
+			    142, 299, 163, 377,	# 30
+			    0, 299, 106, 377,	# 31
+			    142, 414, 221, 434, # 32
+			    429, 414, 489, 434,	# 33
+			    429, 434, 451, 492,	# 34
+			    373, 471, 393, 529,	# 35
+			    315, 529, 489, 548,	# 36
+			    0, 585, 536, 598,	# 37
+			    47, 414, 106, 434, 	# 38
+			    85, 434, 106, 492, 	# 39
+			    9, 471, 48, 492,	# 40
+			    47, 529, 221, 548,	# 41
+			    142, 471, 164, 529,	# 42
+			    0,184, 106, 262,	# 43
+			    0, 377, 9, 597,	# 44
+			    0, 13, 9, 184	# 45
+			  );
+
+#### organized the same as above; these are the rectangles that will 'hide' pacman as 
+####  he enters the warp zone gates
+my @warpZones 		= ( 1, 264, 25, 296, 500, 264, 545, 296);
+
+## These are the actual warp zone gates. When PacMan colides with them, he will be
+## "transported" to the outside of the next gate
+my @warpZoneData	= ( 1,264, 2, 296, 536, 264, 537, 296 );
+
+my @pelletCords		= ( 31, 30, 31, 49, 31, 68, 31, 87, 31, 106, 31, 125, 31, 144, 31, 163,	# top left going down
+			    128, 30,
+			    128, 49,	# top left between islands
+			    128, 68,
+			    128, 87,
+
+			    147, 30, 166, 30, 185, 30, 204, 30, 223, 30,	# above top left 2nd island
+
+			    242, 30,
+			    242, 49,	# top right of 2nd island
+			    242, 68,
+			    242, 87,
+
+			    31, 30, 51, 30, 71, 30, 91, 30, 109, 30, 128, 30, 147, 30, 166,
+			    30, 185, 30, 204, 30, 223, 30, 242, 30, 299, 
+			    30, 318, 30, 337, 30, 356, 30, 375, 30, 394, 30, 432, 
+			    30, 451, 30, 470, 30, 489, 30, 508, 30,   ## 4th row from bottom 
+
+			    51, 106, 71, 106, 91, 106, 109, 106, 128, 106, 147, 106, 166, 106, 
+			    185, 106, 204, 106, 223, 106, 242, 106, 261, 106, 280, 106, 299, 106,
+			    318, 106, 337, 106, 356, 106, 376, 106, 394, 106, 432, 106,
+			    451, 106, 470, 106, 489, 106, 508, 106,   ## Top long row
+
+			    51, 163, 71, 163, 91, 163, 109, 163, 
+			    185, 163, 204, 163, 223, 163, 242, 163, 299, 
+			    163, 318, 163, 337, 163, 356, 163, 432,
+			    163, 451, 163, 470, 163, 489, 163, 508, 163,   ## 2nd row from top
+
+			    128, 125, 128, 144, 128, 163, 128, 182, 128, 201, 128, 220, 128, 239,
+			    128, 258, 128, 277, 128, 296, 128, 315, 128, 334, 128, 353, 128, 372, 
+			    128, 391, 128, 412, 128, 431, 128, 450, 128, 469, 128, 487, 128, 507, 
+			    ## Long column on left
+
+			    413, 31, 413, 49, 413, 68, 413, 87, 413, 106, 
+			    413, 125, 413, 144, 413, 163, 413, 182, 413, 201, 413, 220, 413, 239,
+			    413, 258, 413, 277, 413, 296, 413, 315, 413, 334, 413, 353, 413, 372, 
+			    413, 391, 413, 412, 413, 431, 413, 450, 413, 469, 413, 487, 413, 507, 
+			    ## Long column on right
+
+			    ## Verticle top pieces
+			    508, 49, 299, 49,
+			    508, 68, 299, 68,
+			    508, 87, 299, 87,
+
+			    ## Verticle pieces by ghost house
+			    185, 125, 356, 125, 508, 125,
+			    185, 144, 356, 144, 508, 144,
+			    
+
+			    ## vertical pieces on bottom
+			    31, 545, 31, 526,
+			    242, 545, 242, 526,
+			    299, 545, 299, 526,
+			    508, 545, 508, 526,
+
+			    ## vertical pieces 2rd from bottom
+			    31, 431, 31, 412,
+			    242, 431, 242, 412,
+			    299, 431, 299, 412,
+			    508, 431, 508, 412,
+
+			    ## vertical pieces 3rd from bottom
+			    71, 469, 71, 487,
+			    185, 469, 185, 487,
+			    356, 469, 356, 487,
+			    470, 469, 470, 487,
+
+			    31, 391, 51, 391, 71, 391, 91, 391, 109, 391, 147, 391, 166,
+			    391, 185, 391, 204, 391, 223, 391, 242, 391, 299, 
+			    391, 318, 391, 337, 391, 356, 391, 375, 391, 394, 391, 432, 
+			    391, 451, 391, 470, 391, 489, 391, 508, 391,   ## 4th row from bottom 
+
+			    31, 450, 51, 450, 71, 450, 147, 450, 166,
+			    450, 185, 450, 204, 450, 223, 450, 242,  450, 299, 
+			    450, 318, 450, 337, 450, 356, 450, 376, 450, 394, 450, 
+			    470, 450, 489, 450, 508, 450,   ## 3rd row from bottom 
+
+			    31, 507, 51, 507, 71, 507, 91, 507, 109, 507, 
+			    185, 507, 204, 507, 223, 507, 242, 507,  299, 
+			    507, 318, 507, 337, 507, 356, 507, 432, 
+			    507, 451, 507, 470, 507, 489, 507, 508, 507,   ## 2nd row from bottom 
+
+			    31, 564, 51, 564, 71, 564, 91, 564, 109, 564, 128, 564, 147, 564, 166,
+			    564, 185, 564, 204, 564, 223, 564, 242, 564, 261, 564, 280, 564, 299, 
+			    564, 318, 564, 337, 564, 356, 564, 375, 564, 394, 564, 413, 564, 432, 
+			    564, 451, 564, 470, 564, 489, 564, 508, 564   ## bottom row
+			  );
+my %pellets;
+
+my @SDLBoardRects 	= &boardDataToSDLRects();
+
+my $actions_playing = { 
+        SDL_KEYDOWN () => \&processEventPlayingKeypress,
+}; 
+my $actions_intro_screen = {
+        SDL_KEYDOWN() => \&processEventIntroScreenKeypress,
+};
+
+my $actions_game_over = {
+        SDL_KEYDOWN() => \&processEventGameOver,
+};
+
+my $actions = $actions_intro_screen;
+
+##
+## Program starts here with the main event loop
+##
+&eventLoop();
+
+sub eventLoop {
+	my $next_heartbeat	= $app->ticks;
+	my $event		= new SDL::Event;
+
+	print "Debugging is enabled.\n" if ( $DEBUG );
+
+    MAIN_LOOP:
+    	while ( 1 ) {
+		while ( $event->poll ) {
+
+			my $type = $event->type ( );
+
+			last MAIN_LOOP if ( $type == SDL_QUIT );
+			last MAIN_LOOP if ( $type == SDL_KEYDOWN &&
+					    $event->key_name () eq 'escape' ||
+					    $event->key_name () eq 'q' );
+
+			if ( exists ( $actions->{$type} ) &&
+		     	     ref ( $actions->{$type} ) eq "CODE" ) {
+		     		$actions->{$type}->($event);
+			}
+
+		}
+		if ( $app->ticks >= $next_heartbeat ) {
+			my $n = &heartbeat () || 50;
+			$next_heartbeat = $app->ticks + $n;
+		}
+		$app->delay ( 5 );
+	}
+}
+
+sub heartbeat {
+	if ( $level ) {
+		if ( $playing ) {
+			return &updateGameState ();
+		} else {
+			&drawPauseScreen ();
+			return 500;
+		}
+	} else {
+		&drawIntroScreen ();
+		return 500;
+	}
+
+	return 50;
+}
+
+sub processEventIntroScreenKeypress {
+	my $event = shift;
+
+	my $key_name = $event->key_name ( );
+	if ( $key_name eq 'f' ) {
+		&setFullScreen ( );
+	}
+	if ( $key_name eq 'return' ||
+	     $key_name eq '1' ) {
+		$playing 	= 1;
+		$level 	 	= 1;
+		$gameOver 	= 0;
+		$actions	= $actions_playing;
+		$redraw_all	= 1;
+		$score		= 0;
+		$lives		= $LIVES;
+		$players	= 1;
+	}
+	if ( $key_name eq '2' ) {
+		$playing 	= 1;
+		$level 	 	= 1;
+		$gameOver 	= 0;
+		$actions	= $actions_playing;
+		$redraw_all	= 1;
+		$score		= 0;
+		$lives		= $LIVES;
+		$players	= 2;
+	}
+}
+
+sub processEventPlayingKeypress {
+	my $event = shift;
+
+	$directionNext = 0;
+	my $keyName = $event->key_name ();
+	switch ( $keyName ) {
+		case 'f'	{ &setFullScreen (); }
+		case "up"	{ $directionOld = $direction; $direction = $UP; }
+		case "down"	{ $directionOld = $direction; $direction = $DOWN; }
+		case "left"	{ $directionOld = $direction; $direction = $LEFT; }
+		case "right"	{ $directionOld = $direction; $direction = $RIGHT; }
+		case "p"	{ &positionDebug ( ) if $DEBUG }
+		case "c"	{ if ( $DEBUG ) { 
+					$collisionDebugOn = 1; print "Waiting for collision...\n"; }
+				}
+		case "s"	{ foreach ( keys %ghosts ) { 
+					$ghosts{$_}{'scared'} = ( $ghosts{$_}{'scared'} ) ? 0 : 1;
+				  }
+				}
+		case 'g'	{ $lives = 0; }
+	}
+}
+
+sub processEventGameOver {
+
+}
+
+##
+## Handling the game state (playing the game)
+##
+{
+	my ( $bgColor, $perlManRect, $perlManRectOld, $fgColor, $gameOverFont, $textHeight );
+	my ( @perlManImages, @perlManRects, $perlManState, $nextHeartbeat );
+	my ( $perlManPosX, $perlManPosY, $perlManPosOldX, $perlManPosOldY, $PMSD);
+        my ( $scnt, $pmRect, $sndMunch, $ptick );
+	my ( @ghostImages );  ## All ghost information is stored here.
+
+	sub updateGameState {
+		&configGameScreen unless ( $bgColor );
+
+		##
+		## Game over if player has no more lives
+		##
+		if ( $lives <= 0 ) {
+			$gameOver = 1;
+			&drawGameOver ( );
+			return 500;
+		}
+
+		my $nextHeartbeat = 5; ## Will eventually speed the game up as you go on
+		&drawGameScreen ();
+		return $nextHeartbeat;
+
+	}
+
+	sub configGameScreen {
+		$bgColor = new SDL::Color ( -r=>0, -g=>0, -b=>0 );
+		$fgColor = new SDL::Color ( -r=>0, -g=>255, -b=>255 );
+
+		$gameOverFont = new SDL::TTFont ( -name=>"./fonts/crackman.ttf", -size=>20,
+				-bg=>$bgColor, -fg=>$fgColor );
+
+		## Some starting defaults
+		$perlManState = 1;
+		$PMSD         = 1;
+		$scnt	      = 0;
+		$direction    = $LEFT;
+		$perlManPosX  = $perlManPosOldX = 258;
+		$perlManPosY  = $perlManPosOldY = 436;
+		$perlManPosX  = $perlManPosOldX = 358;
+		$perlManPosY  = $perlManPosOldY = 436;
+	
+		&setupPellets ();
+
+		## Configure ghosts
+		&setupGhosts ();
+
+		## Load up all our perlMan images
+		$perlManImages[0]  = new SDL::Surface ( -name=>'./images/perlman1.gif' );
+		$perlManRect       = new SDL::Rect ( -width=>$perlManImages[0]->width (),
+					             -height=>$perlManImages[0]->height (),
+						     -y=>$perlManPosY, -x=>$perlManPosX );
+		$perlManRectOld    = new SDL::Rect ( -width=>$perlManImages[0]->width (),
+					             -height=>$perlManImages[0]->height (),
+						     -y=>$perlManPosOldY, -x=>$perlManPosOldX );
+	        for ( my $dir = 1; $dir <= 4; $dir++ ) {
+			for ( my $idx = 2; $idx <= 4; $idx++ ) {
+				my $d;
+				switch ( $dir ) {
+					case 1	{ $d = 'u'; }
+					case 2	{ $d = 'd'; }
+					case 3	{ $d = 'l'; }
+					case 4	{ $d = 'r'; }
+				}
+				my $filename = "./images/perlman" . $idx . "" . $d . ".gif";
+				$perlManImages[$dir][$idx] = new SDL::Surface ( -name=>$filename );
+			}
+		}
+
+		## Load up the music
+		$sndMunch = new SDL::Sound ( './sounds/munch A+B.wav' );
+
+	}
+
+	sub drawGameScreen {
+		if ( $redraw_all ) {
+			$app->fill ( 0, $bgColor );
+			&drawGameBoard ();
+			&drawStats ();
+			&drawPellets ();
+
+			my $intro = new SDL::Sound ( './sounds/intro.wav' );
+                	my $readyImage = new SDL::Surface ( -name=>'./images/ready.png' );
+                	my $readyRect  = new SDL::Rect ( -width=>$readyImage->width ( ),
+                                                         -height=>$readyImage->height ( ), -y=>327, -x=>218 );
+			$readyImage->blit ( 0, $app, $readyRect);
+
+			$app->sync ();
+
+			$mixer->play_channel ( 1, $intro, 0 );
+			sleep 5; ## Wait for intro music to finish
+
+
+			$app->fill ( $readyRect, $bgColor );
+
+			## The following are debugging related points to be drawn
+			&drawBoardPoints ( \@gameBoardData ) if ( $drawPoints && $DEBUG );
+			&drawBoardPoints ( \@warpZones ) if ( $drawWarps && $DEBUG );
+			&drawIntersections if ( $drawIntersections && $DEBUG );
+			&drawGrid if ( $drawGrid && $DEBUG ); #
+			&drawBoardPoints ( \@warpZoneData ) if ( $drawWarpGates && $DEBUG );
+
+			$app->sync ();
+			$redraw_all = 0;
+		}
+
+		# 
+		# We always need to modify ghosts, pacman, power pellets (blinking) and
+		# redraw the pellets the ghosts go over.
+		#
+		my @modified_areas = ();
+
+		#
+		# refresh pellets every 10th tick
+		#
+#		$ptick++;
+#		if ( $ptick >= 10 ) {
+#			$ptick = 0;
+#			foreach ( keys %pellets ) {
+#				if ( $pellets{$_}{'active'} ) {
+#					$app->fill ( $pellets{$_}{'rect'}, $pellets{$_}{'color'} ); 
+#					push ( @modified_areas, $pellets{$_}{'rect'} );
+#				}
+#			}
+#		}
+
+		#
+		# Erase old Ghosts
+		#
+		foreach ( @ghostColors ) {
+			$ghosts{$_}{'rectOld'}->x ( $ghosts{$_}{'pos'}{'old'}{'X'} );
+			$ghosts{$_}{'rectOld'}->y ( $ghosts{$_}{'pos'}{'old'}{'Y'} );
+			$app->fill ( $ghosts{$_}{'rectOld'}, $bgColor );
+			push ( @modified_areas, $ghosts{$_}{'rectOld'} );
+		}
+
+		#
+		# draw new ghosts
+		#
+		foreach ( 0 .. $#ghostColors ) {
+			
+			$ghosts{$ghostColors[$_]}{'rect'}->x ( $ghosts{$ghostColors[$_]}{'pos'}{'X'} );
+			$ghosts{$ghostColors[$_]}{'rect'}->y ( $ghosts{$ghostColors[$_]}{'pos'}{'Y'} );
+			my $ghostImg = ( $ghosts{$ghostColors[$_]}{'scared'} ) ? ( 9 + $ghosts{$ghostColors[$_]}{'state'} ) : ( $ghosts{$ghostColors[$_]}{'direction'} + $ghosts{$ghostColors[$_]}{'state'} );
+			$ghosts{$ghostColors[$_]}{'state'} = ( $ghosts{$ghostColors[$_]}{'state'} == 4 ) ? 0 : 4;
+			$ghostImages[$_][$ghostImg]->blit ( 0, $app, $ghosts{$ghostColors[$_]}{'rect'} );
+			push ( @modified_areas, $ghosts{$ghostColors[$_]}{'rect'} );
+		}
+
+		#
+		# Determine where to move ghosts
+		#
+		&updateGhostDirection ( );
+
+		#
+		# Erase Old Pacman
+		#
+		$perlManRectOld->x ( $perlManPosOldX );
+		$perlManRectOld->y ( $perlManPosOldY );
+		$app->fill ( $perlManRectOld, $bgColor );
+		push ( @modified_areas, $perlManRectOld );
+	
+		#
+		# Draw new Pacman
+		#
+		$perlManRect->x ( $perlManPosX );
+		$perlManRect->y ( $perlManPosY );
+		if ( $perlManState == 1 ) { $perlManImages[0]->blit ( 0, $app, $perlManRect ); }
+		else { $perlManImages[$direction][$perlManState]->blit ( 0, $app, $perlManRect ); }
+		push ( @modified_areas, $perlManRect );
+
+
+		# 
+		# Check direction and update
+		#
+		if ( $directionNext ) { 
+			$directionNext = 0 if ( &updatePerlManDirection( $directionNext ) );
+		} else {
+			&updatePerlManDirection ( $direction ); 
+		}
+		&updatePerlManState();
+
+
+		#
+		# Did we eat a pellet?
+		#
+		my $rect = &pelletCollision ( $perlManRect );
+		if ( $rect != 0 ) {
+			# we ate a pellet!  Yum!
+			my $color = new SDL::Color ( 
+				-r => 0x00,
+				-g => 0x00,
+				-b => 0x00,
+			);
+			$app->fill ( $rect, $color );
+			push ( @modified_areas, $rect );
+
+			# Play the munch sound
+			$mixer->play_channel ( 1, $sndMunch, 0 );
+
+			# update the scores
+			&updateScores();
+		}
+
+
+		#
+		# Blink power pellets
+		#
+
+
+		$app->update ( @modified_areas );
+	}
+
+	sub updateScores {
+		my ( $fontColor, $font );
+
+		$fontColor = new SDL::Color (
+			-r => 0xff,
+			-g => 0xff,
+			-b => 0xff,
+		);
+
+		my $rectColor = new SDL::Color (
+			-r => 0x00,
+			-g => 0x00,
+			-b => 0x00,
+		);
+
+		my $rect = new SDL::Rect (
+			-x => 600,
+			-y => 300,
+			-height => 26,
+			-width => 100,
+		);
+
+		$app->fill ( $rect, $rectColor );
+
+		$font = new SDL::TTFont ( -name=>"./fonts/CourierNew-Bold.ttf", -size=>16,
+					     -bg=>$rectColor, -fg=>$fontColor );
+		$font->print ( $app, 600, 300, "Score: " . $score);
+
+		$app->sync();
+	}
+
+	sub drawGrid {
+		for ( my $idx = 0; $idx <= $#gridCorners; $idx += 2 ) {
+		
+		}
+	}
+
+	sub drawIntersections {
+		my $size = scalar @intersections;
+		$size--;
+
+		# Rectangles
+		for ( my $idx = 0; $idx <= $size; $idx += 6 ) {
+			&drawRectI ( $intersections[$idx], $intersections[$idx + 1],
+				     $intersections[$idx] + 1, $intersections[$idx + 1] + 1, $idx );
+		}
+	}
+
+	sub drawBoardPoints {
+		my $ref = shift; 
+		my @rectData = @$ref;
+		my $size = scalar @rectData;
+		$size--;
+	
+		# Rectangles
+		for ( my $idx = 0; $idx <= $size; $idx += 4 ) {
+			&drawRect ( $rectData[$idx], $rectData[$idx + 1], 
+			  	    $rectData[$idx + 2], $rectData[$idx + 3 ], $idx );
+		}
+	}
+
+	sub updateGhostDirection () {
+#		my $speed = 1;
+
+		## Determine where to move ghost
+		&perlManPosition ();
+
+		## Move ghost towards target
+
+
+		foreach ( keys %ghosts ) {
+			my $changeY = 0;
+			my $changeX = 0;
+
+			switch ( $ghosts{$_}{'direction'} ) {
+				case 1 { $changeY -= $ghostSpeed; } #up
+		 		case 2 { $changeY += $ghostSpeed; } #down
+				case 3 { $changeX -= $ghostSpeed; } #left
+				case 4 { $changeX += $ghostSpeed; } #right
+			}
+
+				my $gRect = SDL::Rect->new (
+					-height => $ghosts{$_}{'rect'}->height,
+					-width  => $ghosts{$_}{'rect'}->width,
+					-x	=> $ghosts{$_}{'rect'}->x + $changeX,
+					-y	=> $ghosts{$_}{'rect'}->y + $changeY,
+				);
+	
+				if ( &wallCollision ( $gRect ) == 0 ) {
+					$ghosts{$_}{'pos'}{'old'}{'Y'} = $ghosts{$_}{'pos'}{'Y'};
+					$ghosts{$_}{'pos'}{'old'}{'X'} = $ghosts{$_}{'pos'}{'X'};
+					$ghosts{$_}{'pos'}{'Y'}       += $changeY;
+					$ghosts{$_}{'pos'}{'X'}       += $changeX;
+				}
+				else { $ghosts{$_}{'targetWait'} = 0; }
+		}
+	}
+
+	sub updatePerlManDirection () {
+		my $dir     = ( $directionNext != 0 ) ? $directionNext : shift;
+		my $speed   = 2;  # number of pixels to move pacman
+		my $sleep   = 1;  # wait delay to move pacman (decrease to increase speed)
+		my $changeX = 0;
+		my $changeY = 0;
+
+		if ( $scnt < $sleep ) {
+			$scnt++;
+			return 0;
+		}
+
+		$scnt++;
+		$scnt = 0 if ( $scnt >= $sleep );
+
+		switch ( $dir ) {
+			case 1 { $changeY -= $speed; } #up
+		 	case 2 { $changeY += $speed; } #down
+			case 3 { $changeX -= $speed; } #left
+			case 4 { $changeX += $speed; } #right
+		}
+		$pmRect = SDL::Rect->new (
+			-height => $perlManRect->height,
+			-width  => $perlManRect->width,
+			-x	=> $perlManRect->x + $changeX,
+			-y	=> $perlManRect->y + $changeY,
+		);
+
+		if ( &wallCollision ( $pmRect ) == 0 ) {
+ 			$perlManPosOldY = $perlManPosY;
+ 			$perlManPosOldX = $perlManPosX;
+			$perlManPosY   += $changeY;
+			$perlManPosX   += $changeX;
+			$directionOld   = $dir if ( $dir != $directionOld );
+			return 1;
+		}
+		else {
+			$directionNext = ( $dir != $directionOld ) ? $directionOld : 0;
+			return 0;
+		}
+	}
+
+	## Animiation state
+	sub updatePerlManState () {
+		if ( $perlManAnim > $perlManAnimSpeed ) {
+			$perlManState += $PMSD;
+			$perlManAnim = 0;
+		}
+		$PMSD = -1 if ( $perlManState > 3 );
+		$PMSD = 1 if ( $perlManState < 2 );
+		$perlManAnim++;
+	}
+
+	##
+	## Draw Pellets
+	##
+	sub drawPellets () {
+		foreach ( keys %pellets ) {
+			$app->fill ( $pellets{$_}{'rect'}, $pellets{$_}{'color'} )
+				if ( $pellets{$_}{'active'} );
+		}
+	}
+
+	##
+	## Display our blue game board borders
+	## 
+	sub drawGameBoard () {
+		my $gameBoardImage = new SDL::Surface ( -name=>'./images/gameboard.png' );
+		my $gameBoardRect  = new SDL::Rect ( -width=>$gameBoardImage->width(),
+						     -height=>$gameBoardImage->height(), 
+						     -y=>$boardOffsetY, -x=>$boardOffsetX );
+		$gameBoardImage->blit ( 0, $app, $gameBoardRect );
+	}
+
+	## 
+	## Display high score, initial score, pacman lives, and level fruits
+	##
+	sub drawStats () {
+		my $smallTitleImage = new SDL::Surface ( -name=>'./images/perlman-title-small.png' );
+		my $smallTitleRect  = new SDL::Rect ( -width=>$smallTitleImage->width(),
+						      -height=>$smallTitleImage->height(), -y=>4, -x=>550 );
+		$smallTitleImage->blit ( 0, $app, $smallTitleRect );
+
+		&updateScores ();
+	}
+
+		sub pelletCollision {
+			my $object = shift;	# must be a SDL->Rect
+		
+			my $leftB   = $object->x;
+			my $rightB  = $object->x + $object->width;
+			my $topB    = $object->y;
+			my $bottomB = $object->y + $object->height;
+
+			foreach ( keys %pellets ) {
+				if ( $pellets{$_}{'active'} ) {
+					my $leftA   = $pellets{$_}{'rect'}->x;
+					my $rightA  = $pellets{$_}{'rect'}->x + $pellets{$_}{'rect'}->width;
+					my $topA    = $pellets{$_}{'rect'}->y;
+					my $bottomA = $pellets{$_}{'rect'}->y + $pellets{$_}{'rect'}->height;
+
+					next if ( $bottomA <= $topB );
+					next if ( $topA >= $bottomB );
+					next if ( $rightA <= $leftB );
+					next if ( $leftA >= $rightB );
+
+					$score += $pellets{$_}{'points'};
+					$pellets{$_}{'active'} = 0;
+				
+					$eattenPellets++;
+
+					return $pellets{$_}{'rect'};
+				}
+			}
+
+			return 0;
+		}
+
+		sub setupGhosts {
+			# We have four ghosts.  We need to assign each ghost a graphic,
+			# animation state, location, and whatever we need for the AI 
+			# which I have yet to learn how to do.
+			foreach ( 0 .. $#ghostColors ) {
+				$ghosts{$ghostColors[$_]}{'speed'}   			= 1;
+				$ghosts{$ghostColors[$_]}{'state'}	   		= 0;
+				$ghosts{$ghostColors[$_]}{'scared'}	   		= 0;
+				$ghosts{$ghostColors[$_]}{'pacPos'}	   		= $DOWN_LEFT;
+				$ghosts{$ghostColors[$_]}{'mode'}	   		= $PATROL;
+				$ghosts{$ghostColors[$_]}{'pos'}{'X'} 	  		= $ghostStart[$_]{x};
+				$ghosts{$ghostColors[$_]}{'pos'}{'Y'} 	  		= $ghostStart[$_]{y};
+				$ghosts{$ghostColors[$_]}{'pos'}{'old'}{'X'} 		= $ghostStart[$_]{x};
+				$ghosts{$ghostColors[$_]}{'pos'}{'old'}{'Y'} 		= $ghostStart[$_]{y};
+				$ghosts{$ghostColors[$_]}{'target'}{'X'}		= 0;
+				$ghosts{$ghostColors[$_]}{'target'}{'Y'}		= 0;
+				$ghosts{$ghostColors[$_]}{'targetWait'} 		= 0;
+				$ghosts{$ghostColors[$_]}{'aggression'} 		= $ghostAggressions{$ghostColors[$_]};
+				switch ( $_ ) {
+					case 0	{ $ghosts{$ghostColors[$_]}{'direction'} = $LEFT; }
+					case 1	{ $ghosts{$ghostColors[$_]}{'direction'} = $UP; }
+					case 2	{ $ghosts{$ghostColors[$_]}{'direction'} = $UP; }
+					case 3	{ $ghosts{$ghostColors[$_]}{'direction'} = $DOWN; }
+				}
+				for ( my $idx = 1; $idx <= 8; $idx++ ) {
+					my $filen = "./images/ghost-" . $ghostColors[$_] . "-" . $idx . ".gif";
+					$ghostImages[$_][$idx] = new SDL::Surface ( -name => $filen );
+				}
+				$ghostImages[$_][9] = new SDL::Surface ( -name => './images/ghost-scared-1.gif' );
+				$ghostImages[$_][13] = new SDL::Surface ( -name => './images/ghost-scared-2.gif' );
+			$ghosts{$ghostColors[$_]}{'rect'} = new SDL::Rect ( 
+					-width  => $ghostImages[$_][1]->width,
+					-height => $ghostImages[$_][1]->height,
+					-x 	=> $ghosts{$ghostColors[$_]}{'pos'}{'X'},
+					-y 	=> $ghosts{$ghostColors[$_]}{'pos'}{'Y'}
+			);
+			$ghosts{$ghostColors[$_]}{'rectOld'} = new SDL::Rect ( 
+					-width  => $ghostImages[$_][1]->width,
+					-height => $ghostImages[$_][1]->height,
+					-x 	=> $ghosts{$ghostColors[$_]}{'pos'}{'old'}{'X'},
+					-y 	=> $ghosts{$ghostColors[$_]}{'pos'}{'old'}{'Y'}
+			);
+
+		}
+	}
+
+	sub drawGameOver {
+		my @msg = ( "GAME OVER", "Score: $score", "Level: $level", 
+			    "Press button to continue" );
+		
+		my $textHeight = $gameOverFont->height ( $msg[0] );
+		my $top        = ( 600 - ( ( scalar @msg ) * $textHeight ) ) / 2;
+
+		foreach my $m ( @msg ) {
+			my $x = $gameOverFont->width ( 0, $m );
+			$x    = ( 800 - $x ) / 2;
+
+			$gameOverFont->print ( $app, 150, $top, $m );
+			$top += $textHeight;
+		}
+		$app->sync();
+	}
+
+	sub positionDebug {
+		if ( $DEBUG ) {
+			my $x  = $perlManRect->x."\t\t\t\t".$pmRect->x;
+			my $y  = $perlManRect->y."\t\t\t\t".$pmRect->y;
+			my $x1 = $perlManRect->x + $perlManRect->width;
+			$x1 .= "\t\t\t\t".($pmRect->x + $perlManRect->width);
+			my $y1 = $perlManRect->y + $perlManRect->height;
+			$y1 .= "\t\t\t\t".($pmRect->y + $perlManRect->height);
+			print <<EOF;
+Position of PerlMan on map:
+
+Corner	   Where we are going to be	Where we were
+x	-> $x
+y	-> $y
+x+h	-> $x1
+y+w	-> $y1
+EOF
+		}
+	}
+
+	#
+	# Determine pacman's position from a ghost and set a direction
+	#
+sub perlManPosition {
+		foreach ( keys %ghosts ) {
+			$ghosts{$_}{'targetWait'}--;
+
+			## If we are aggressive enough and see pacman, chase him
+			$ghosts{$_}{'targetWait'} = 0 if ( $ghosts{$_}{'aggression'} > 50 && &seePacMan ( $_ ) );
+
+			## Are we ready for a new target?
+			next if ( ( $ghosts{$_}{'targetWait'} ) > $ghosts{$_}{'aggression'} );
+			$ghosts{$_}{'targetWait'} = 200;
+
+			## Find PacMan and head towards him
+			my $dx = abs ( $ghosts{$_}{'rect'}->x - $perlManRect->x );
+			my $dy = abs ( $ghosts{$_}{'rect'}->y - $perlManRect->y );
+
+			if ( $dx >= $dy ) { &doRandomChase ( $_ ) if ( &tryHorizontalChase ( $_ ) == 0 ); }
+			else		  { &doRandomChase ( $_ ) if ( &tryVerticleChase ( $_ ) == 0 ); }
+		}	
+	}
+
+	sub tryHorizontalChase {
+		my $ghost = shift;
+
+		if ( ( $ghosts{$ghost}{'rect'}->x > $perlManRect->x ) && ( &canMove ( $ghost, $LEFT ) ) ) {	
+			# pacman is on our left
+			$ghosts{$ghost}{'direction'} = ( $ghosts{$ghost}{'scared'} ) ? $RIGHT : $LEFT;
+			$ghosts{$ghost}{'pacPos'} = $RIGHT;
+			return 1;
+		} elsif ( &canMove ( $ghost, $RIGHT ) ) {
+			# PacMan is on our right
+			$ghosts{$ghost}{'direction'} = ( $ghosts{$ghost}{'scared'} ) ? $LEFT: $RIGHT;
+			$ghosts{$ghost}{'pacPos'} = $LEFT;
+			return 1;
+		}
+		return 0;
+	}
+
+	sub tryVerticleChase {
+		my $ghost = shift;
+
+		if ( ( $ghosts{$ghost}{'rect'}->y <= $perlManRect->y ) && ( &canMove ( $ghost, $DOWN ) ) ) {
+			#pacman is below us
+			$ghosts{$ghost}{'direction'} = ( $ghosts{$ghost}{'scared'} ) ? $UP : $DOWN;
+			$ghosts{$ghost}{'pacPos'} = $DOWN;
+			return 1;
+		} elsif ( &canMove ( $ghost, $UP ) ) {		
+			$ghosts{$ghost}{'direction'} = ( $ghosts{$ghost}{'scared'} ) ? $DOWN : $UP;
+			$ghosts{$ghost}{'pacPos'} = $UP;
+			return 1;
+		}
+		else { return 0; }
+	}
+
+	sub doRandomChase {
+		my $ghost = shift;
+		my $rdir  = 0;
+#		print "Random Chase ($ghost): using direction ==> ";
+		do { $rdir = int rand ( 4 ) + 1; } while ( $rdir != $ghosts{$ghost}{'direction'} && ! &canMove ( $_, $rdir ) );
+		$ghosts{$ghost}{'direction'} = $rdir;
+#	print "$rdir\n";
+	}
+
+	# Can we move in the direction we want to go?
+	sub canMove {
+		my ( $ghost, $dir ) = @_;
+		my $changeY = 0;
+		my $changeX = 0;
+
+                switch ( $dir ) {
+                        case 1 { $changeY -= $ghostSpeed; } #up
+                        case 2 { $changeY += $ghostSpeed; } #down
+                        case 3 { $changeX -= $ghostSpeed; } #left
+                	case 4 { $changeX += $ghostSpeed; } #right
+                }
+
+
+                my $gRect = SDL::Rect->new (
+                	-height => $ghosts{$ghost}{'rect'}->height,
+                        -width  => $ghosts{$ghost}{'rect'}->width,
+                        -x      => $ghosts{$ghost}{'rect'}->x + $changeX,
+                        -y      => $ghosts{$ghost}{'rect'}->y + $changeY,
+                );
+
+                return 1 if ( &wallCollision ( $gRect ) == 0 );
+
+		return 0;
+	}
+
+	sub seePacMan {
+		return 0;
+	}
+}
+
+## 
+## Handling the opening intro screen
+## 
+{
+	my ( $bgColor, $fgColor, $titleImage, $titleRect );
+
+	sub configIntroScreen {
+		my ( $fontColor, $font );
+
+		$bgColor = new SDL::Color ( -r=>0, -g=>0, -b=>0 );	#black
+		$fgColor = new SDL::Color ( -r=>0, -g=>255, -b=>255 );	#yellow
+
+		$titleImage = new SDL::Surface ( -name=>'./images/perlman-title.gif' );
+		$titleRect  = new SDL::Rect ( -width=>$titleImage->width ( ),
+					      -height=>$titleImage->height ( ), -y=>50, -x=>39 );
+
+		## A few quick directions to get the player started
+                $fontColor = new SDL::Color (
+                        -r => 0xff,
+                        -g => 0xff,
+                        -b => 0xff,
+                );
+                
+		$font  = new SDL::TTFont  ( -name=>"fonts/CourierNew-Bold.ttf", -size=>20,
+                                            -bg=>$bgColor, -fg=>$fontColor);
+	
+
+		# no point in grabbing the mouse...
+		SDL::Cursor::show ( undef, 1 );
+		$app->grab_input ( SDL_GRAB_OFF ); 
+
+		$app->fill ( 0, $bgColor );
+		
+		$titleImage->blit ( 0, $app, $titleRect );
+
+		my @msg = ( "Press 1 for single player", "Press 2 for two player", 
+			    "Press F for fullscreen mode", "Press Q or ESC to quit" );
+                my $textHeight = $font->height ( $msg[0] );
+                my $top        = ( 800 - ( ( scalar @msg ) * $textHeight ) ) / 2;
+
+                foreach my $m ( @msg ) {
+                        my $x = $font->width ( 0, $m );
+                        $x = ( 800 - $x ) / 2;
+
+                        $font->print ( $app, 250, $top, $m );
+                        $top += $textHeight;
+                }
+		
+		$app->sync ( );
+	}
+
+	sub drawIntroScreen {
+		&configIntroScreen unless ( defined ( $bgColor ) );
+	}
+}
+
+##
+## We have a list of pellet coordinates.  We want to 
+## populate our pellet hash with pellet images, rectangles
+## locations, and activity
+##
+sub setupPellets {
+	my $pcount = scalar @pelletCords;
+	$pcount--;
+
+	for ( my $idx = 0; $idx <= $pcount; $idx += 2 ) {
+		$pellets{$idx}{'points'} = 10;
+		$pellets{$idx}{'active'} = 1;
+		$pellets{$idx}{'color'} = new SDL::Color ( 
+			-r => 0xff,
+			-g => 0xb8,
+			-b => 0x97,
+		);
+		$pellets{$idx}{'rect'}   = SDL::Rect->new (
+			-height => 4,
+			-width  => 4,
+			-x	=> ( $pelletCords[$idx] ), #+ $pelletOffsetX ),
+			-y	=> ( $pelletCords[$idx+1] ),# + $pelletOffsetY ),
+		);
+	}
+}
+
+## Convert our board x,y Data in to SDL rectangles so we don't need to keep redoing this
+sub boardDataToSDLRects {
+	my $size = scalar @gameBoardData;
+	my @SDLRects = ();
+	$size--;
+	
+	for ( my $idx = 0; $idx <= $size; $idx += 4 ) {
+		my $rect = SDL::Rect->new (
+				-height => ( $gameBoardData[$idx + 3] - $gameBoardData[$idx + 1] + 4 ),
+				-width  => ( $gameBoardData[$idx + 2] - $gameBoardData[$idx] + 3 ),
+				-x	=> $gameBoardData[$idx] + $boardOffsetX - 1,
+				-y 	=> $gameBoardData[$idx + 1] + $boardOffsetY - 2,
+			);
+		push ( @SDLRects, $rect );
+	}
+
+	return @SDLRects;
+}
+
+
+##
+## Lets do some wall collisions.
+## This will tell us if we are about to hit a wall.
+## Usefull for pacman and the ghosts
+###
+sub wallCollision {
+	my $object = shift;	# must be a SDL->Rect
+	my $hit    = 0;
+	
+	my $leftB   = $object->x;
+	my $rightB  = $object->x + $object->width;
+        my $topB    = $object->y;
+    	my $bottomB = $object->y + $object->height;
+
+	for my $rect ( 0 .. $#SDLBoardRects ) {
+		my $leftA   = $SDLBoardRects[$rect]->x;
+		my $rightA  = $SDLBoardRects[$rect]->x + $SDLBoardRects[$rect]->width;
+		my $topA    = $SDLBoardRects[$rect]->y;
+		my $bottomA = $SDLBoardRects[$rect]->y + $SDLBoardRects[$rect]->height;
+
+		next if ( $bottomA <= $topB );
+	        next if ( $topA >= $bottomB );
+		next if ( $rightA <= $leftB );
+	        next if ( $leftA >= $rightB );
+		
+		if ( $collisionDebugOn && $DEBUG ) {
+			print <<EOF;
+Direction	: $direction
+DirectionOld	: $directionOld
+DirectionNext	: $directionNext
+
+Collision with wall $rect at:
+	+---------------+---------------+
+	| Wall  	| PacMan	|
++-------+---------------+---------------+
+| Bottom| $bottomA		| $bottomB		|
+| Top	| $topA		| $topB		|
+| Right	| $rightA		| $rightB		|
+| Left	| $leftA		| $leftB		|
++-------+---------------+---------------+
+
+EOF
+			$collisionDebugOn--;
+		}
+		$hit++;
+	}
+	
+	return $hit; 	# returns non-zero for a hit
+}
+
+##
+## Switch between fullscreen and windowed.  Take away our mouse cursor in fullscreen
+##
+sub setFullScreen {
+	$app->fullscreen ();
+	if ( ! $fullscreen ) {
+		$fullscreen = 1;
+		SDL::Cursor::show ( undef, 0 );
+		$app->grab_input ( SDL_GRAB_ON );	
+	}
+	else {
+                $fullscreen = 0;
+                SDL::Cursor::show ( undef, 1 );
+                $app->grab_input ( SDL_GRAB_OFF );
+	}
+}
+
+
+
+###############################
+#### Temporary fucntions
+###############################
+
+sub drawRect {
+	my ( $x1, $y1, $x2, $y2, $num ) = @_;
+
+	my $color = SDL::Color->new (
+		-r => 0xff,
+		-g => 0xff,
+		-b => 0xff,
+	);
+
+	my $rect = SDL::Rect->new (
+		-height => ( $y2 - $y1 ),
+		-width  => ( $x2 - $x1 ),
+		-x	=> $x1 + $boardOffsetX,
+		-y 	=> $y1 + $boardOffsetY,
+	);
+	
+	$app->fill ( $rect, $color ) if ( ! $numOnly );
+
+	if ( $labelRects ) {
+		$num /= 4;
+		$color = new SDL::Color (
+			-r => 0x00,
+			-g => 0x00,
+			-b => 0x00,
+		) if ( $numOnly );		
+
+		my $fontColor = new SDL::Color ( 
+			-r => 0xff,
+			-g => 0x00,
+			-b => 0x00,
+		);
+		my $font = new SDL::TTFont ( -name=>"./fonts/CourierNew-Bold.ttf", -size=>10,
+					     -bg=>$color, -fg=>$fontColor );
+		$font->print ( $app, $rect->x, $rect->y, $num );
+	}
+}
+
+sub drawRectI {
+	my ( $x1, $y1, $x2, $y2, $num ) = @_;
+
+	my $color = SDL::Color->new (
+		-r => 0x00,
+		-g => 0xff,
+		-b => 0x00,
+	);
+
+	my $rect = SDL::Rect->new (
+		-height => ( $y2 - $y1 ),
+		-width  => ( $x2 - $x1 ),
+		-x	=> $x1 + $boardOffsetX,
+		-y 	=> $y1 + $boardOffsetY,
+	);
+	
+	$app->fill ( $rect, $color );
+}
+
+sub drawPixel {
+	my ( $x, $y ) = @_;
+
+	my $color = SDL::Color->new (
+		-r => 0xff,
+		-g => 0x00,
+		-b => 0x00,
+	);
+
+	my $rect = SDL::Rect->new (
+		-height => 1,
+		-width  => 1,
+		-x	=> $x + $boardOffsetX,
+		-y 	=> $y + $boardOffsetY,
+	);
+	
+	$app->fill ( $rect, $color );
+}
+
+
