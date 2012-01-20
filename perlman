@@ -3,7 +3,7 @@
 =begin comment info
 
 	PerlMan -- PacMan clone written using the Perl::SDL
-	Version : $Id: perlman,v 1.1 2009-03-28 03:35:34 nick Exp $
+	Version : $Id: perlman,v 1.2 2012-01-20 14:56:50 nick Exp $
 
 =end comment info
 =cut
@@ -85,6 +85,8 @@ my $directionNext	= 0;
 my $fullscreen   	= 0;
 my $baseSpeed	 	= 0.3;
 my $eattenPellets	= 0;
+my $collisionCheckMax   = 15;    # reduce this to increase collision accuracy and increase CPU usage
+my $collisionCheck	= $collisionCheckMax;
 my %ghosts;			# ghost data
 my @ghostColors		= ( 'red', 'cyan', 'pink', 'orange' );  # in order of agression
 my %ghostAggressions	= ( 'red' => 90, 'cyan' => 70, 'pink' => 50, 'orange' => 30 );
@@ -381,10 +383,10 @@ sub processEventPlayingKeypress {
 	my $keyName = $event->key_name ();
 	switch ( $keyName ) {
 		case 'f'	{ &setFullScreen (); }
-		case "up"	{ $directionOld = $direction; $direction = $UP; }
-		case "down"	{ $directionOld = $direction; $direction = $DOWN; }
-		case "left"	{ $directionOld = $direction; $direction = $LEFT; }
-		case "right"	{ $directionOld = $direction; $direction = $RIGHT; }
+		case "up"	{ $directionOld = $direction; $direction = $UP;    $collisionCheck = 0; }
+		case "down"	{ $directionOld = $direction; $direction = $DOWN;  $collisionCheck = 0; }
+		case "left"	{ $directionOld = $direction; $direction = $LEFT;  $collisionCheck = 0; }
+		case "right"	{ $directionOld = $direction; $direction = $RIGHT; $collisionCheck = 0; }
 		case "p"	{ &positionDebug ( ) if $DEBUG }
 		case "c"	{ if ( $DEBUG ) { 
 					$collisionDebugOn = 1; print "Waiting for collision...\n"; }
@@ -394,6 +396,9 @@ sub processEventPlayingKeypress {
 				  }
 				}
 		case 'g'	{ $lives = 0; }
+
+		case 'a'	{ $collisionCheckMax++; print STDOUT "CollisionCheckMax Up: $collisionCheckMax\n"; }
+		case 'z' 	{ $collisionCheckMax--; print STDOUT "CollisionCheckMax Down: $collisionCheckMax\n"; }
 	}
 }
 
@@ -433,8 +438,9 @@ sub processEventGameOver {
 		$bgColor = new SDL::Color ( -r=>0, -g=>0, -b=>0 );
 		$fgColor = new SDL::Color ( -r=>0, -g=>255, -b=>255 );
 
-		$gameOverFont = new SDL::TTFont ( -name=>"./fonts/crackman.ttf", -size=>20,
-				-bg=>$bgColor, -fg=>$fgColor );
+		$gameOverFont = new SDL::TTFont ( -name=>"./fonts/crackman.ttf",
+						  -size=>20, -bg=>$bgColor, 
+						  -fg=>$fgColor );
 
 		## Some starting defaults
 		$perlManState = 1;
@@ -641,8 +647,9 @@ sub processEventGameOver {
 
 		$app->fill ( $rect, $rectColor );
 
-		$font = new SDL::TTFont ( -name=>"./fonts/CourierNew-Bold.ttf", -size=>16,
-					     -bg=>$rectColor, -fg=>$fontColor );
+		$font = new SDL::TTFont ( -name=>"./fonts/CourierNew-Bold.ttf", 
+					  -size=>16, -bg=>$rectColor, 
+					  -fg=>$fontColor );
 		$font->print ( $app, 600, 300, "Score: " . $score);
 
 		$app->sync();
@@ -887,7 +894,8 @@ sub processEventGameOver {
 		my $top        = ( 600 - ( ( scalar @msg ) * $textHeight ) ) / 2;
 
 		foreach my $m ( @msg ) {
-			my $x = $gameOverFont->width ( 0, $m );
+#			my $x = $gameOverFont->width ( 0, $m );
+			my $x = 1;
 			$x    = ( 800 - $x ) / 2;
 
 			$gameOverFont->print ( $app, 150, $top, $m );
@@ -1035,8 +1043,8 @@ sub perlManPosition {
                         -b => 0xff,
                 );
                 
-		$font  = new SDL::TTFont  ( -name=>"fonts/CourierNew-Bold.ttf", -size=>20,
-                                            -bg=>$bgColor, -fg=>$fontColor);
+		$font  = new SDL::TTFont  ( -name=>"fonts/CourierNew-Bold.ttf", 					    -size=>20, -bg=>$bgColor, 
+					    -fg=>$fontColor );
 	
 
 		# no point in grabbing the mouse...
@@ -1053,7 +1061,7 @@ sub perlManPosition {
                 my $top        = ( 800 - ( ( scalar @msg ) * $textHeight ) ) / 2;
 
                 foreach my $m ( @msg ) {
-                        my $x = $font->width ( 0, $m );
+                        my $x = 1;#$font->width ( 0, $m );
                         $x = ( 800 - $x ) / 2;
 
                         $font->print ( $app, 250, $top, $m );
@@ -1123,6 +1131,17 @@ sub wallCollision {
 	my $object = shift;	# must be a SDL->Rect
 	my $hit    = 0;
 	
+	##
+	## This reduces how often we check for collisions.  In essence this breaks
+	## the board down in to quadrants.  This greatly reduces CPU over-head.
+	##
+#	if ( $collisionCheck > 0 )
+#	{
+#		$collisionCheck--;
+#		return 0;
+#	}
+#	$collisionCheck = $collisionCheckMax;
+	
 	my $leftB   = $object->x;
 	my $rightB  = $object->x + $object->width;
         my $topB    = $object->y;
@@ -1160,7 +1179,6 @@ EOF
 		}
 		$hit++;
 	}
-	
 	return $hit; 	# returns non-zero for a hit
 }
 
@@ -1218,8 +1236,9 @@ sub drawRect {
 			-g => 0x00,
 			-b => 0x00,
 		);
-		my $font = new SDL::TTFont ( -name=>"./fonts/CourierNew-Bold.ttf", -size=>10,
-					     -bg=>$color, -fg=>$fontColor );
+		my $font = new SDL::TTFont ( 
+			-name=>"./fonts/CourierNew-Bold.ttf", -size=>10, 
+			-bg=>$color, -fg=>$fontColor );
 		$font->print ( $app, $rect->x, $rect->y, $num );
 	}
 }
